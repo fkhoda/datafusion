@@ -49,7 +49,7 @@
     <link rel="index" title="Index" href="../../genindex.html" />
     <link rel="search" title="Search" href="../../search.html" />
     <link rel="next" title="Upgrade Guides" href="54.0.0.html" />
-    <link rel="prev" title="Upgrade Guides" href="index.html" />
+    <link rel="prev" title="Upgrade Guides" href="56.0.0.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="" />
@@ -303,6 +303,7 @@
 <ul class="current nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../index.html">Introduction</a></li>
 <li class="toctree-l1 current active has-children"><a class="reference internal" href="index.html">Upgrade Guides</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="56.0.0.html">DataFusion 56.0.0</a></li>
 <li class="toctree-l2 current active"><a class="current reference internal" href="#">DataFusion 55.0.0</a></li>
 <li class="toctree-l2"><a class="reference internal" href="54.0.0.html">DataFusion 54.0.0</a></li>
 <li class="toctree-l2"><a class="reference internal" href="53.0.0.html">DataFusion 53.0.0</a></li>
@@ -452,9 +453,55 @@
 <h1>Upgrade Guides<a class="headerlink" href="#upgrade-guides" title="Link to this heading">#</a></h1>
 <section id="datafusion-55-0-0">
 <h2>DataFusion 55.0.0<a class="headerlink" href="#datafusion-55-0-0" title="Link to this heading">#</a></h2>
-<p><strong>Note:</strong> DataFusion <code class="docutils literal notranslate"><span class="pre">55.0.0</span></code> has not been released yet. The information provided
-in this section pertains to features and changes that have already been merged
-to the main branch and are awaiting release in this version.</p>
+<section id="filter-predicate-evaluation-order-may-differ-from-query-text">
+<h3>Filter predicate evaluation order may differ from query text<a class="headerlink" href="#filter-predicate-evaluation-order-may-differ-from-query-text" title="Link to this heading">#</a></h3>
+<p>The logical optimizer now reorders filters so that cheap predicates (most binary
+comparisons, <code class="docutils literal notranslate"><span class="pre">IS</span> <span class="pre">NULL</span></code>, <code class="docutils literal notranslate"><span class="pre">Between</span></code>, <code class="docutils literal notranslate"><span class="pre">InList</span></code>, etc.) evaluate before expensive
+ones (<code class="docutils literal notranslate"><span class="pre">LIKE</span></code>, regex, scalar function calls, subqueries). For example,
+<code class="docutils literal notranslate"><span class="pre">WHERE</span> <span class="pre">col</span> <span class="pre">LIKE</span> <span class="pre">'%foo%'</span> <span class="pre">AND</span> <span class="pre">col2</span> <span class="pre">=</span> <span class="pre">5</span></code> may evaluate <code class="docutils literal notranslate"><span class="pre">col2</span> <span class="pre">=</span> <span class="pre">5</span></code> before
+<code class="docutils literal notranslate"><span class="pre">col</span> <span class="pre">LIKE</span> <span class="pre">'%foo%'</span></code>.</p>
+<p><strong>Evaluation order has never been guaranteed to match the order written in the
+query.</strong> The SQL standard explicitly allows implementations to evaluate operands
+in any order; major engines (PostgreSQL, SQL Server, Oracle, MySQL) document the
+same. Queries should not rely on left-to-right evaluation or short-circuit
+semantics for <code class="docutils literal notranslate"><span class="pre">AND</span></code> or <code class="docutils literal notranslate"><span class="pre">OR</span></code>. Previous versions of DataFusion already reordered
+predicates (e.g., as part of expression simplification or predicate pushdown);
+the new reordering pass just increases the scenarios where the optimizer will
+change predicate evaluation order.</p>
+<p><strong>Fallible-predicate patterns are particularly affected.</strong> For example:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">WHERE</span><span class="w"> </span><span class="n">s</span><span class="w"> </span><span class="o">~</span><span class="w"> </span><span class="s1">&#39;^[0-9]+$&#39;</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">s</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">INT</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span>
+</pre></div>
+</div>
+<p>The intent is likely to filter non-numeric strings before the <code class="docutils literal notranslate"><span class="pre">CAST</span></code> runs,
+but this depends on evaluation-order behavior the SQL standard does not
+guaranteed. The new reorder makes this kind of pattern more likely to fail
+at runtime if the optimizer moves the <code class="docutils literal notranslate"><span class="pre">CAST</span></code> ahead of the regex. To force
+conditional evaluation, rewrite using <code class="docutils literal notranslate"><span class="pre">CASE</span></code>, which has standardized
+short-circuit semantics:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">WHERE</span><span class="w"> </span><span class="k">CASE</span><span class="w"> </span><span class="k">WHEN</span><span class="w"> </span><span class="n">s</span><span class="w"> </span><span class="o">~</span><span class="w"> </span><span class="s1">&#39;^[0-9]+$&#39;</span><span class="w"> </span><span class="k">THEN</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">s</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">INT</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="k">ELSE</span><span class="w"> </span><span class="k">false</span><span class="w"> </span><span class="k">END</span>
+</pre></div>
+</div>
+<p>Volatile expressions (<code class="docutils literal notranslate"><span class="pre">random()</span></code>, <code class="docutils literal notranslate"><span class="pre">now()</span></code>, etc.) are exempt — their position
+in the conjunct list is preserved so the number of times they evaluate per
+query does not change.</p>
+</section>
+<section id="map-casts-with-nested-structs-use-schema-evolution-rules">
+<h3>Map casts with nested Structs use schema-evolution rules<a class="headerlink" href="#map-casts-with-nested-structs-use-schema-evolution-rules" title="Link to this heading">#</a></h3>
+<p>Casts of a <code class="docutils literal notranslate"><span class="pre">Map</span></code> whose key or value recursively contains a <code class="docutils literal notranslate"><span class="pre">Struct</span></code> now adapt
+nested Struct fields by case-sensitive name. Nullable fields added to the target
+Struct are filled with <code class="docutils literal notranslate"><span class="pre">NULL</span></code>, and source-only fields are omitted. Missing
+non-nullable target fields, nullable-to-non-nullable changes, and incompatible
+nested types are rejected.</p>
+<p>Map keys define map identity. During this nested-Struct adaptation, key Struct
+fields cannot be removed and primitive key type changes must preserve every
+source value (for example, <code class="docutils literal notranslate"><span class="pre">Int32</span></code> to <code class="docutils literal notranslate"><span class="pre">Int64</span></code> is allowed, while <code class="docutils literal notranslate"><span class="pre">Int64</span></code> to
+<code class="docutils literal notranslate"><span class="pre">Int32</span></code> is rejected). Sorted Maps also require an unchanged key type and the
+same sorted flag.</p>
+<p><strong>Migration guide:</strong> Schemas that relied on positional Struct-field matching,
+key-field removal, or narrowing Map-key casts must be updated to retain
+case-sensitive field names and key identity. Ordinary Maps without semantic
+Struct children continue to use Arrow’s normal Map cast behavior.</p>
+</section>
 <section id="tableprovider-scan-takes-option-usize-for-the-projection">
 <h3><code class="docutils literal notranslate"><span class="pre">TableProvider::scan</span></code> takes <code class="docutils literal notranslate"><span class="pre">Option&lt;&amp;[usize]&gt;</span></code> for the projection<a class="headerlink" href="#tableprovider-scan-takes-option-usize-for-the-projection" title="Link to this heading">#</a></h3>
 <p><code class="docutils literal notranslate"><span class="pre">TableProvider::scan</span></code> and the related APIs listed below previously took the
@@ -595,6 +642,11 @@ arm.</p>
 </pre></div>
 </div>
 <p>Use <code class="docutils literal notranslate"><span class="pre">temp_file.size()</span></code> instead of <a class="reference external" href="https://docs.rs/datafusion-execution/latest/datafusion_execution/disk_manager/struct.RefCountedTempFile.html#method.current_disk_usage"><code class="docutils literal notranslate"><span class="pre">RefCountedTempFile::current_disk_usage</span></code></a>.</p>
+</section>
+<section id="new-dialect-spark-variant">
+<h3>New <code class="docutils literal notranslate"><span class="pre">Dialect::Spark</span></code> variant<a class="headerlink" href="#new-dialect-spark-variant" title="Link to this heading">#</a></h3>
+<p>The <code class="docutils literal notranslate"><span class="pre">Dialect</span></code> enum in <code class="docutils literal notranslate"><span class="pre">datafusion_common::config</span></code> now includes a <code class="docutils literal notranslate"><span class="pre">Spark</span></code> variant.
+If you match exhaustively on <code class="docutils literal notranslate"><span class="pre">Dialect</span></code>, add a <code class="docutils literal notranslate"><span class="pre">Dialect::Spark</span></code> arm.</p>
 </section>
 <section id="dialect-available-replaced-by-dialect-available">
 <h3><code class="docutils literal notranslate"><span class="pre">Dialect::AVAILABLE</span></code> replaced by <code class="docutils literal notranslate"><span class="pre">Dialect::available()</span></code><a class="headerlink" href="#dialect-available-replaced-by-dialect-available" title="Link to this heading">#</a></h3>
@@ -1641,6 +1693,25 @@ runtime), implement <code class="docutils literal notranslate"><span class="pre"
 following the pattern in <a class="reference external" href="https://github.com/apache/arrow-rs/blob/main/parquet/examples/object_store.rs"><code class="docutils literal notranslate"><span class="pre">parquet/examples/object_store.rs</span></code></a></p>
 <p>See <a class="reference external" href="https://github.com/apache/datafusion/pull/24030">PR #24030</a> for details.</p>
 </section>
+<section id="sortproperties-and-or-replaced-by-and-and-or">
+<h3><code class="docutils literal notranslate"><span class="pre">SortProperties::and_or</span></code> replaced by <code class="docutils literal notranslate"><span class="pre">and</span></code> and <code class="docutils literal notranslate"><span class="pre">or</span></code><a class="headerlink" href="#sortproperties-and-or-replaced-by-and-and-or" title="Link to this heading">#</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">datafusion_expr_common::sort_properties::SortProperties::and_or</span></code> has been
+removed. Call <code class="docutils literal notranslate"><span class="pre">and</span></code> for <code class="docutils literal notranslate"><span class="pre">AND</span></code> and <code class="docutils literal notranslate"><span class="pre">or</span></code> for <code class="docutils literal notranslate"><span class="pre">OR</span></code>:</p>
+<div class="highlight-rust notranslate"><div class="highlight"><pre><span></span><span class="c1">// Before (54.0.0)</span>
+<span class="kd">let</span><span class="w"> </span><span class="n">props</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">lhs</span><span class="p">.</span><span class="n">and_or</span><span class="p">(</span><span class="o">&amp;</span><span class="n">rhs</span><span class="p">);</span>
+
+<span class="c1">// After (55.0.0)</span>
+<span class="kd">let</span><span class="w"> </span><span class="n">props</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">lhs</span><span class="p">.</span><span class="n">and</span><span class="p">(</span><span class="o">&amp;</span><span class="n">rhs</span><span class="p">);</span><span class="w"> </span><span class="c1">// for AND</span>
+<span class="kd">let</span><span class="w"> </span><span class="n">props</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">lhs</span><span class="p">.</span><span class="n">or</span><span class="p">(</span><span class="o">&amp;</span><span class="n">rhs</span><span class="p">);</span><span class="w">  </span><span class="c1">// for OR</span>
+</pre></div>
+</div>
+<p>The two operators do not preserve the same sort orders. <code class="docutils literal notranslate"><span class="pre">AND</span></code> keeps an ordering
+only when nulls sort after <code class="docutils literal notranslate"><span class="pre">true</span></code> (<code class="docutils literal notranslate"><span class="pre">ASC</span> <span class="pre">NULLS</span> <span class="pre">LAST</span></code> or <code class="docutils literal notranslate"><span class="pre">DESC</span> <span class="pre">NULLS</span> <span class="pre">FIRST</span></code>), and
+<code class="docutils literal notranslate"><span class="pre">OR</span></code> only when nulls sort before <code class="docutils literal notranslate"><span class="pre">false</span></code> (<code class="docutils literal notranslate"><span class="pre">ASC</span> <span class="pre">NULLS</span> <span class="pre">FIRST</span></code> or
+<code class="docutils literal notranslate"><span class="pre">DESC</span> <span class="pre">NULLS</span> <span class="pre">LAST</span></code>). <code class="docutils literal notranslate"><span class="pre">and_or</span></code> did not say which operator the caller meant, so it
+could not be right for both.</p>
+<p>See <a class="reference external" href="https://github.com/apache/datafusion/pull/24276">PR #24276</a> for details.</p>
+</section>
 <section id="datafusion-proto-parquet-options-conversions-are-fallible">
 <h3><code class="docutils literal notranslate"><span class="pre">datafusion-proto</span></code>: parquet options conversions are fallible<a class="headerlink" href="#datafusion-proto-parquet-options-conversions-are-fallible" title="Link to this heading">#</a></h3>
 <p><code class="docutils literal notranslate"><span class="pre">protobuf::ParquetOptions</span></code> and <code class="docutils literal notranslate"><span class="pre">protobuf::TableParquetOptions</span></code> validate
@@ -1663,6 +1734,46 @@ changes.</p>
 </div>
 <p>See <a class="reference external" href="https://github.com/apache/datafusion/issues/24019">issue #24019</a> for details.</p>
 </section>
+<section id="range-window-frames-with-offsets-now-reject-order-by-types-without-arithmetic">
+<h3>RANGE window frames with offsets now reject ORDER BY types without arithmetic<a class="headerlink" href="#range-window-frames-with-offsets-now-reject-order-by-types-without-arithmetic" title="Link to this heading">#</a></h3>
+<p>A <code class="docutils literal notranslate"><span class="pre">RANGE</span></code> frame offset such as <code class="docutils literal notranslate"><span class="pre">1</span> <span class="pre">PRECEDING</span></code> is measured in <code class="docutils literal notranslate"><span class="pre">ORDER</span> <span class="pre">BY</span></code> values
+rather than in rows, so the frame bound is computed as <code class="docutils literal notranslate"><span class="pre">current_value</span> <span class="pre">-</span> <span class="pre">1</span></code>. That
+requires arithmetic on the <code class="docutils literal notranslate"><span class="pre">ORDER</span> <span class="pre">BY</span></code> type. For types that have no such
+arithmetic – <code class="docutils literal notranslate"><span class="pre">Utf8</span></code>, <code class="docutils literal notranslate"><span class="pre">Binary</span></code>, <code class="docutils literal notranslate"><span class="pre">Boolean</span></code>, <code class="docutils literal notranslate"><span class="pre">List</span></code> and <code class="docutils literal notranslate"><span class="pre">Null</span></code> – such frames are
+now rejected when the query is planned:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SELECT</span><span class="w"> </span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="n">RANGE</span><span class="w"> </span><span class="k">BETWEEN</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">PRECEDING</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="k">CURRENT</span><span class="w"> </span><span class="k">ROW</span><span class="p">)</span>
+<span class="k">FROM</span><span class="w"> </span><span class="p">(</span><span class="k">VALUES</span><span class="w"> </span><span class="p">(</span><span class="s1">&#39;a&#39;</span><span class="p">),</span><span class="w"> </span><span class="p">(</span><span class="s1">&#39;b&#39;</span><span class="p">),</span><span class="w"> </span><span class="p">(</span><span class="s1">&#39;c&#39;</span><span class="p">))</span><span class="w"> </span><span class="n">t</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+<span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">x</span><span class="p">;</span>
+<span class="c1">-- Error during planning: RANGE with offset PRECEDING/FOLLOWING is not supported for ORDER BY type Utf8</span>
+</pre></div>
+</div>
+<p>What this replaces depends on the <code class="docutils literal notranslate"><span class="pre">ORDER</span> <span class="pre">BY</span></code> type. Over <code class="docutils literal notranslate"><span class="pre">Utf8</span></code>, <code class="docutils literal notranslate"><span class="pre">Boolean</span></code> and
+<code class="docutils literal notranslate"><span class="pre">List</span></code> keys such queries planned successfully, and in DataFusion 54 the failing
+frame-bound arithmetic was silently treated as an overflow
+(<a class="reference external" href="https://github.com/apache/datafusion/pull/22140">#22140</a>): the bound collapsed
+to the partition edge, and the query returned results computed over that wrongly
+widened frame instead of an offset window. DataFusion 53 and earlier failed
+during execution with an arithmetic error. Rows whose order key value was <code class="docutils literal notranslate"><span class="pre">NULL</span></code>
+never reached the arithmetic, so queries where every order key value was <code class="docutils literal notranslate"><span class="pre">NULL</span></code>
+returned correct results throughout; those also now fail at planning. Over a
+<code class="docutils literal notranslate"><span class="pre">Null</span></code>-typed key the offset itself failed to coerce, erroring at planning time
+with <code class="docutils literal notranslate"><span class="pre">Cast</span> <span class="pre">error:</span> <span class="pre">Casting</span> <span class="pre">from</span> <span class="pre">Utf8</span> <span class="pre">to</span> <span class="pre">Null</span> <span class="pre">not</span> <span class="pre">supported</span></code>, and binary keys were
+rejected for every <code class="docutils literal notranslate"><span class="pre">RANGE</span></code> frame with the internal error quoted below – for
+those two, only the error message changes.</p>
+<p>Such an <code class="docutils literal notranslate"><span class="pre">ORDER</span> <span class="pre">BY</span></code> type is still usable with the <code class="docutils literal notranslate"><span class="pre">UNBOUNDED</span> <span class="pre">PRECEDING</span></code>,
+<code class="docutils literal notranslate"><span class="pre">CURRENT</span> <span class="pre">ROW</span></code> and <code class="docutils literal notranslate"><span class="pre">UNBOUNDED</span> <span class="pre">FOLLOWING</span></code> bounds, which are located by comparing
+<code class="docutils literal notranslate"><span class="pre">ORDER</span> <span class="pre">BY</span></code> values rather than by computing them. Binary order keys additionally
+gained support for those bounds in this release, having previously failed with
+<code class="docutils literal notranslate"><span class="pre">Internal</span> <span class="pre">error:</span> <span class="pre">Cannot</span> <span class="pre">run</span> <span class="pre">range</span> <span class="pre">queries</span> <span class="pre">on</span> <span class="pre">datatype:</span> <span class="pre">Binary</span></code>.</p>
+<p><strong>Who is affected:</strong></p>
+<ul class="simple">
+<li><p>Queries using <code class="docutils literal notranslate"><span class="pre">offset</span> <span class="pre">PRECEDING</span></code> or <code class="docutils literal notranslate"><span class="pre">offset</span> <span class="pre">FOLLOWING</span></code> in a <code class="docutils literal notranslate"><span class="pre">RANGE</span></code> frame over
+a non-numeric, non-temporal <code class="docutils literal notranslate"><span class="pre">ORDER</span> <span class="pre">BY</span></code> key. To count rows rather than compare
+values, use a <code class="docutils literal notranslate"><span class="pre">ROWS</span></code> frame; to include everything up to the partition edge,
+use <code class="docutils literal notranslate"><span class="pre">UNBOUNDED</span> <span class="pre">PRECEDING</span></code> or <code class="docutils literal notranslate"><span class="pre">UNBOUNDED</span> <span class="pre">FOLLOWING</span></code>.</p></li>
+</ul>
+<p>See <a class="reference external" href="https://github.com/apache/datafusion/issues/24327">issue #24327</a> for details.</p>
+</section>
 </section>
 </section>
 
@@ -1677,7 +1788,7 @@ changes.</p>
                   
 <div class="prev-next-area">
     <a class="left-prev"
-       href="index.html"
+       href="56.0.0.html"
        title="previous page">
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
@@ -1714,10 +1825,13 @@ changes.</p>
   <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#datafusion-55-0-0">DataFusion 55.0.0</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#filter-predicate-evaluation-order-may-differ-from-query-text">Filter predicate evaluation order may differ from query text</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#map-casts-with-nested-structs-use-schema-evolution-rules">Map casts with nested Structs use schema-evolution rules</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#tableprovider-scan-takes-option-usize-for-the-projection"><code class="docutils literal notranslate"><span class="pre">TableProvider::scan</span></code> takes <code class="docutils literal notranslate"><span class="pre">Option&lt;&amp;[usize]&gt;</span></code> for the projection</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#dataframe-fill-null-now-borrows-its-arguments"><code class="docutils literal notranslate"><span class="pre">DataFrame::fill_null</span></code> now borrows its arguments</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#filescanconfig-partitioned-by-file-group-removed"><code class="docutils literal notranslate"><span class="pre">FileScanConfig::partitioned_by_file_group</span></code> removed</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#user-spillfile-traits-instead-of-refcountedtempfile">User <code class="docutils literal notranslate"><span class="pre">SpillFile</span></code> traits instead of <code class="docutils literal notranslate"><span class="pre">RefCountedTempFile</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#new-dialect-spark-variant">New <code class="docutils literal notranslate"><span class="pre">Dialect::Spark</span></code> variant</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#dialect-available-replaced-by-dialect-available"><code class="docutils literal notranslate"><span class="pre">Dialect::AVAILABLE</span></code> replaced by <code class="docutils literal notranslate"><span class="pre">Dialect::available()</span></code></a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#spill-record-batch-by-size-removed"><code class="docutils literal notranslate"><span class="pre">spill_record_batch_by_size</span></code> removed</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#createexternaltable-supports-multiple-locations"><code class="docutils literal notranslate"><span class="pre">CreateExternalTable</span></code> supports multiple locations</a></li>
@@ -1752,7 +1866,9 @@ changes.</p>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#array-distance-scalar-function-now-rejects-multidimensional-arrays"><code class="docutils literal notranslate"><span class="pre">array_distance</span></code> scalar function now rejects multidimensional arrays</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#exprtype-gained-a-sqlsimilartopattern-variant"><code class="docutils literal notranslate"><span class="pre">ExprType</span></code> gained a <code class="docutils literal notranslate"><span class="pre">SqlSimilarToPattern</span></code> variant</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#parquetobjectreader-parquetobjectwriter-deprecated-upstream"><code class="docutils literal notranslate"><span class="pre">ParquetObjectReader</span></code> / <code class="docutils literal notranslate"><span class="pre">ParquetObjectWriter</span></code> deprecated upstream</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#sortproperties-and-or-replaced-by-and-and-or"><code class="docutils literal notranslate"><span class="pre">SortProperties::and_or</span></code> replaced by <code class="docutils literal notranslate"><span class="pre">and</span></code> and <code class="docutils literal notranslate"><span class="pre">or</span></code></a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#datafusion-proto-parquet-options-conversions-are-fallible"><code class="docutils literal notranslate"><span class="pre">datafusion-proto</span></code>: parquet options conversions are fallible</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#range-window-frames-with-offsets-now-reject-order-by-types-without-arithmetic">RANGE window frames with offsets now reject ORDER BY types without arithmetic</a></li>
 </ul>
 </li>
 </ul>
